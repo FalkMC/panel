@@ -10,10 +10,13 @@ import shutil
 import glob
 import webbrowser
 import re
+import socket
 from tkinter import messagebox
 from mcstatus import JavaServer
 
 from views.settings_dialog import ServerSettingsDialog
+from resource import resource_path
+
 
 class ServersView(ctk.CTkFrame):
     def __init__(self, master, colors, servers_base, **kwargs):
@@ -25,11 +28,15 @@ class ServersView(ctk.CTkFrame):
         if not os.path.exists(self.servers_base):
             os.makedirs(self.servers_base, exist_ok=True)
 
-        self.server_processes = {}      # subprocess.Popen objects
-        self.poll_jobs = {}             # after_id for each server
+        self.server_processes = {}
+        self.poll_jobs = {}
         self.scan_thread = None
         self.scanning = False
         self._destroyed = False
+
+        # Public IP cache
+        self._cached_public_ip = None
+        self._public_ip_fetch_time = 0
 
         self.build_ui()
         self.refresh_servers()
@@ -53,7 +60,7 @@ class ServersView(ctk.CTkFrame):
             height=32,
             fg_color=self.colors["green"],
             text_color="#05261C",
-            hover_color=self.colors["border"],
+            hover_color=self._darken_color(self.colors["green"], 0.75),
             command=self.new_server_dialog
         )
         new_btn.pack(side="right", padx=5)
@@ -65,6 +72,71 @@ class ServersView(ctk.CTkFrame):
         self.scrollable_frame.pack(fill="both", expand=True, padx=5, pady=5)
         self.scrollable_frame._scrollbar.configure(width=6)
 
+    # Auto colour darkerning
+    def _darken_color(self, hex_color, factor=0.75):
+        # Return a darker version of a hex color
+        hex_color = hex_color.lstrip('#')
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        r = int(r * factor)
+        g = int(g * factor)
+        b = int(b * factor)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    # IP helpers
+    def _get_local_ip(self):
+        try:
+            hostname = socket.gethostname()
+            ip_list = socket.gethostbyname_ex(hostname)[2]
+            for ip in ip_list:
+                if not ip.startswith("127.") and "." in ip:
+                    return ip
+        except:
+            pass
+        return "Unknown"
+
+    # Return cached public IP / refresh every 5 minutes
+    def _get_public_ip(self):
+        now = time.time()
+        if self._cached_public_ip and (now - self._public_ip_fetch_time) < 300:
+            return self._cached_public_ip
+        try:
+            response = requests.get("https://api.ipify.org", timeout=3)
+            if response.status_code == 200:
+                self._cached_public_ip = response.text.strip()
+                self._public_ip_fetch_time = now
+                return self._cached_public_ip
+        except:
+            pass
+        return self._cached_public_ip or "Unknown"
+
+    # Copy txt
+    def _copy_to_clipboard(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.update()
+
+    # Toggle IP visibility for a given server card
+    def _toggle_ip_visibility(self, card):
+        card.show_ips = not getattr(card, 'show_ips', False)
+        local_ip = getattr(card, 'local_ip', '')
+        public_ip = getattr(card, 'public_ip', '')
+        port = getattr(card, 'port', '')
+        show = card.show_ips
+
+        if local_ip:
+            if show:
+                card.local_label.configure(text=f"Local: {local_ip}:{port}")
+            else:
+                card.local_label.configure(text="Local: ***.***.***.***")
+        if public_ip:
+            if show:
+                card.public_label.configure(text=f"Public: {public_ip}:{port}")
+            else:
+                card.public_label.configure(text="Public: ***.***.***.***")
+
+    # efresh & scanning
     def refresh_servers(self):
         if self._destroyed or not self.winfo_exists():
             return
@@ -162,6 +234,7 @@ class ServersView(ctk.CTkFrame):
                 )
         self.scanning = False
 
+    # Server card creation
     def add_server_card(self, server_name, server_path, port, motd, is_running, ram="2G"):
         card = ctk.CTkFrame(
             self.scrollable_frame,
@@ -176,15 +249,16 @@ class ServersView(ctk.CTkFrame):
         card.grid_columnconfigure(1, weight=1)
         card.grid_columnconfigure(2, weight=0)
 
-        status_color = self.colors["green"] if is_running else self.colors["text_muted"]
+        # Status dot
         status_label = ctk.CTkLabel(
             card,
             text="●",
             font=("Segoe UI", 18),
-            text_color=status_color
+            text_color=self.colors["green"] if is_running else self.colors["text_muted"]
         )
         status_label.grid(row=0, column=0, padx=(15, 5), pady=10, sticky="w")
 
+        # Server name
         name_label = ctk.CTkLabel(
             card,
             text=server_name,
@@ -193,6 +267,7 @@ class ServersView(ctk.CTkFrame):
         )
         name_label.grid(row=0, column=1, padx=5, pady=5, sticky="w")
 
+        # Details
         details_label = ctk.CTkLabel(
             card,
             text=f"Port: {port}  •  {motd}",
@@ -201,6 +276,7 @@ class ServersView(ctk.CTkFrame):
         )
         details_label.grid(row=1, column=1, padx=5, pady=(0, 5), sticky="w")
 
+        # Info
         info_label = ctk.CTkLabel(
             card,
             text=f"0/20 players  •  {ram} RAM",
@@ -209,9 +285,89 @@ class ServersView(ctk.CTkFrame):
         )
         info_label.grid(row=2, column=1, padx=5, pady=(0, 5), sticky="w")
 
-        controls_frame = ctk.CTkFrame(card, fg_color="transparent")
-        controls_frame.grid(row=0, column=2, rowspan=3, padx=10, pady=5, sticky="e")
+        # IP info row with eye toggle
+        ip_row = ctk.CTkFrame(card, fg_color="transparent")
+        ip_row.grid(row=3, column=1, padx=5, pady=(0, 5), sticky="w")
 
+        local_ip = self._get_local_ip()
+        public_ip = self._get_public_ip()
+
+        # Store IPs and port on the card for toggle
+        card.local_ip = local_ip
+        card.public_ip = public_ip
+        card.port = port
+        card.show_ips = False   # default: hidden
+
+        # Local IP label
+        local_label = ctk.CTkLabel(
+            ip_row,
+            text="Local: ***.***.***.***",
+            font=("Segoe UI", 10),
+            text_color=self.colors["text_muted"]
+        )
+        local_label.pack(side="left", padx=(0, 5))
+
+        # Copy local btn
+        copy_local_btn = ctk.CTkButton(
+            ip_row,
+            text="Copy",
+            width=40,
+            height=18,
+            fg_color=self.colors["border"],
+            text_color=self.colors["text"],
+            font=("Segoe UI", 9),
+            hover_color=self._darken_color(self.colors["border"], 0.75),
+            command=lambda: self._copy_to_clipboard(f"{local_ip}:{port}")
+        )
+        copy_local_btn.pack(side="left", padx=(0, 15))
+
+        # Public IP label
+        public_label = ctk.CTkLabel(
+            ip_row,
+            text="Public: ***.***.***.***",
+            font=("Segoe UI", 10),
+            text_color=self.colors["text_muted"]
+        )
+        public_label.pack(side="left", padx=(0, 5))
+
+        # Copy public btn
+        copy_public_btn = ctk.CTkButton(
+            ip_row,
+            text="Copy",
+            width=40,
+            height=18,
+            fg_color=self.colors["border"],
+            text_color=self.colors["text"],
+            font=("Segoe UI", 9),
+            hover_color=self._darken_color(self.colors["border"], 0.75),
+            command=lambda: self._copy_to_clipboard(f"{public_ip}:{port}")
+        )
+        copy_public_btn.pack(side="left", padx=(0, 10))
+
+        # Eye toggle btn
+        eye_btn = ctk.CTkButton(
+            ip_row,
+            text="👁", # icon, mid or naw?!?
+            width=30,
+            height=20,
+            fg_color="transparent",
+            text_color=self.colors["text_muted"],
+            font=("Segoe UI", 12),
+            hover_color=self.colors["border"],
+            command=lambda: self._toggle_ip_visibility(card)
+        )
+        eye_btn.pack(side="left", padx=5)
+
+        # Store refs
+        card.local_label = local_label
+        card.public_label = public_label
+        card.eye_btn = eye_btn
+
+        # Controls (btns)
+        controls_frame = ctk.CTkFrame(card, fg_color="transparent")
+        controls_frame.grid(row=0, column=2, rowspan=4, padx=10, pady=5, sticky="e")
+
+        # Start button
         start_btn = ctk.CTkButton(
             controls_frame,
             text="Start",
@@ -219,11 +375,12 @@ class ServersView(ctk.CTkFrame):
             height=28,
             fg_color=self.colors["green"],
             text_color="#05261C",
-            state="normal" if not is_running else "disabled",
+            hover_color=self._darken_color(self.colors["green"], 0.75),
             command=lambda: self.start_server(server_path, card)
         )
         start_btn.pack(side="left", padx=2)
 
+        # Stop btn
         stop_btn = ctk.CTkButton(
             controls_frame,
             text="Stop",
@@ -231,11 +388,12 @@ class ServersView(ctk.CTkFrame):
             height=28,
             fg_color="#e74c3c",
             text_color="white",
-            state="normal" if is_running else "disabled",
+            hover_color=self._darken_color("#e74c3c", 0.75),
             command=lambda: self.stop_server(server_path, card)
         )
         stop_btn.pack(side="left", padx=2)
 
+        # Restart btn
         restart_btn = ctk.CTkButton(
             controls_frame,
             text="Restart",
@@ -243,11 +401,12 @@ class ServersView(ctk.CTkFrame):
             height=28,
             fg_color=self.colors["border"],
             text_color=self.colors["text"],
-            state="normal" if is_running else "disabled",
+            hover_color=self._darken_color(self.colors["border"], 0.75),
             command=lambda: self.restart_server(server_path, card)
         )
         restart_btn.pack(side="left", padx=2)
 
+        # Settings btn
         settings_btn = ctk.CTkButton(
             controls_frame,
             text="⚙",
@@ -255,22 +414,27 @@ class ServersView(ctk.CTkFrame):
             height=28,
             fg_color=self.colors["border"],
             text_color=self.colors["text"],
+            hover_color=self._darken_color(self.colors["border"], 0.75),
             command=lambda: self.open_settings(server_path)
         )
         settings_btn.pack(side="left", padx=2)
 
+        # Store remaining refs
         card.server_path = server_path
-        card.port = port
         card.status_label = status_label
         card.info_label = info_label
         card.start_btn = start_btn
         card.stop_btn = stop_btn
         card.restart_btn = restart_btn
+        card.settings_btn = settings_btn
+
+        # Apply initial visual state
+        self.update_card_status(card, is_running)
 
         if is_running:
             self._start_player_poll(server_path, card, port)
 
-    # ----- Player count polling (with widget existence check) -----
+    # Player count polling
     def _start_player_poll(self, server_path, card, port):
         if server_path in self.poll_jobs:
             self.after_cancel(self.poll_jobs[server_path])
@@ -329,7 +493,7 @@ class ServersView(ctk.CTkFrame):
             self.after_cancel(self.poll_jobs[server_path])
             del self.poll_jobs[server_path]
 
-    # ----- Server running check (fast) -----
+    # Server running check
     def is_server_running(self, server_path):
         jar_path = os.path.join(server_path, "server.jar")
         for proc in psutil.process_iter(['pid', 'cmdline', 'cwd']):
@@ -344,7 +508,7 @@ class ServersView(ctk.CTkFrame):
                 pass
         return False
 
-    # ----- Java detection (unchanged) -----
+    # Java detection
     def find_java(self):
         candidates = []
         path_java = shutil.which("java")
@@ -408,7 +572,7 @@ class ServersView(ctk.CTkFrame):
         except Exception:
             return None
 
-    # ----- Server settings helpers -----
+    # Server settings helpers
     def get_ram_for_server(self, server_path):
         ram = "2G"
         falkmc_path = os.path.join(server_path, "falkmc.json")
@@ -433,7 +597,7 @@ class ServersView(ctk.CTkFrame):
                         break
         return port
 
-    # ----- Start / Stop / Restart -----
+    # Start / Stop / Restart
     def start_server(self, server_path, card):
         if self.is_server_running(server_path):
             messagebox.showinfo("Server Running", "This server is already running.")
@@ -473,15 +637,18 @@ class ServersView(ctk.CTkFrame):
 
         ram = self.get_ram_for_server(server_path)
         cmd = [java_path, f"-Xmx{ram}", f"-Xms{ram}", "-jar", jar_path, "-nogui"]
-        print("Starting:", " ".join(cmd))
+
+        # Open log file to capture server output
+        log_path = os.path.join(server_path, "falkmc_console.log")
+        log_file = open(log_path, "w", encoding="utf-8", errors="replace")
 
         try:
             proc = subprocess.Popen(
                 cmd,
                 cwd=server_path,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
                 text=True,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
@@ -491,13 +658,21 @@ class ServersView(ctk.CTkFrame):
 
             time.sleep(2)
             if proc.poll() is not None:
-                error_output = proc.stderr.read() if proc.stderr else ""
-                stdout_output = proc.stdout.read() if proc.stdout else ""
+                # Server crashed – read the log file
+                try:
+                    log_file.flush()
+                except:
+                    pass
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                        error_output = f.read()
+                except:
+                    error_output = ""
                 self.update_card_status(card, running=False)
                 self.stop_player_poll(server_path)
                 if server_path in self.server_processes:
                     del self.server_processes[server_path]
-                full_error = f"STDERR:\n{error_output}\n\nSTDOUT:\n{stdout_output}"
+                full_error = f"LOG:\n{error_output}"
                 if "UnsupportedClassVersionError" in error_output:
                     match = re.search(r'version (\d+)\.0', error_output)
                     if match:
@@ -581,26 +756,58 @@ class ServersView(ctk.CTkFrame):
         self.stop_server(server_path, card)
         card.after(1000, lambda: self.start_server(server_path, card))
 
+    # Update card status with visual disabled states
     def update_card_status(self, card, running):
         if self._destroyed or not self.winfo_exists() or not card.winfo_exists():
             return
+
+        # Define disabled colors
+        disabled_bg = "#555555"
+        disabled_text = "#888888"
+
         if running:
+            # Server is running: start disabled, stop/restart enabled
+            card.start_btn.configure(
+                state="disabled",
+                fg_color=disabled_bg,
+                text_color=disabled_text
+            )
+            card.stop_btn.configure(
+                state="normal",
+                fg_color="#e74c3c",
+                text_color="white"
+            )
+            card.restart_btn.configure(
+                state="normal",
+                fg_color=self.colors["border"],
+                text_color=self.colors["text"]
+            )
             card.status_label.configure(text_color=self.colors["green"])
-            card.start_btn.configure(state="disabled")
-            card.stop_btn.configure(state="normal")
-            card.restart_btn.configure(state="normal")
         else:
+            # Server is stopped: start enabled, stop/restart disabled
+            card.start_btn.configure(
+                state="normal",
+                fg_color=self.colors["green"],
+                text_color="#05261C"
+            )
+            card.stop_btn.configure(
+                state="disabled",
+                fg_color=disabled_bg,
+                text_color=disabled_text
+            )
+            card.restart_btn.configure(
+                state="disabled",
+                fg_color=disabled_bg,
+                text_color=disabled_text
+            )
             card.status_label.configure(text_color=self.colors["text_muted"])
-            card.start_btn.configure(state="normal")
-            card.stop_btn.configure(state="disabled")
-            card.restart_btn.configure(state="disabled")
 
     def open_settings(self, server_path):
         dialog = ServerSettingsDialog(self, self.colors, server_path)
         dialog.wait_window()
         self.refresh_servers()
 
-    # ----- New Server Dialog (button now visible) -----
+    # New Server Dialog
     def new_server_dialog(self):
         dialog = ctk.CTkToplevel(self)
         dialog.title("New Server")
@@ -608,6 +815,8 @@ class ServersView(ctk.CTkFrame):
         dialog.resizable(False, False)
         dialog.transient(self)
         dialog.grab_set()
+        dialog.configure(fg_color=self.colors["bg"])
+        dialog.iconbitmap(resource_path("images/logo.ico"))
 
         dialog.update_idletasks()
         x = (dialog.winfo_screenwidth() // 2) - 210
@@ -615,41 +824,107 @@ class ServersView(ctk.CTkFrame):
         dialog.geometry(f"+{x}+{y}")
 
         # Server Name
-        ctk.CTkLabel(dialog, text="Server Name:", font=("Segoe UI", 14)).pack(pady=(20, 5), padx=20, anchor="w")
-        name_entry = ctk.CTkEntry(dialog, width=340)
+        ctk.CTkLabel(
+            dialog, text="Server Name:",
+            font=("Segoe UI", 14),
+            text_color=self.colors["text"]
+        ).pack(pady=(20, 5), padx=20, anchor="w")
+
+        name_entry = ctk.CTkEntry(
+            dialog, width=340,
+            fg_color=self.colors["element"],
+            text_color=self.colors["text"],
+            border_color=self.colors["border"]
+        )
         name_entry.pack(padx=20, pady=5)
         name_entry.insert(0, "My Server")
 
         # Server Type
-        ctk.CTkLabel(dialog, text="Server Type:", font=("Segoe UI", 14)).pack(pady=(10, 5), padx=20, anchor="w")
+        ctk.CTkLabel(
+            dialog, text="Server Type:",
+            font=("Segoe UI", 14),
+            text_color=self.colors["text"]
+        ).pack(pady=(10, 5), padx=20, anchor="w")
+
         type_var = ctk.StringVar(value="Vanilla")
-        type_menu = ctk.CTkOptionMenu(dialog, values=["Vanilla", "Paper"], variable=type_var, width=340)
+        type_menu = ctk.CTkOptionMenu(
+            dialog,
+            values=["Vanilla", "Paper"],
+            variable=type_var,
+            width=340,
+            fg_color=self.colors["element"],
+            button_color=self.colors["border"],
+            button_hover_color=self._darken_color(self.colors["border"], 0.75),
+            text_color=self.colors["text"],
+            dropdown_fg_color=self.colors["element"],
+            dropdown_text_color=self.colors["text"],
+            dropdown_hover_color=self.colors["border"]
+        )
         type_menu.pack(padx=20, pady=5)
 
         # Version
-        ctk.CTkLabel(dialog, text="Version:", font=("Segoe UI", 14)).pack(pady=(10, 5), padx=20, anchor="w")
+        ctk.CTkLabel(
+            dialog, text="Version:",
+            font=("Segoe UI", 14),
+            text_color=self.colors["text"]
+        ).pack(pady=(10, 5), padx=20, anchor="w")
+
         version_var = ctk.StringVar()
-        version_menu = ctk.CTkOptionMenu(dialog, values=["Loading..."], variable=version_var, width=340)
+        version_menu = ctk.CTkOptionMenu(
+            dialog,
+            values=["Loading..."],
+            variable=version_var,
+            width=340,
+            fg_color=self.colors["element"],
+            button_color=self.colors["border"],
+            button_hover_color=self._darken_color(self.colors["border"], 0.75),
+            text_color=self.colors["text"],
+            dropdown_fg_color=self.colors["element"],
+            dropdown_text_color=self.colors["text"],
+            dropdown_hover_color=self.colors["border"]
+        )
         version_menu.pack(padx=20, pady=5)
 
         # RAM Allocation
-        ctk.CTkLabel(dialog, text="RAM Allocation:", font=("Segoe UI", 14)).pack(pady=(10, 5), padx=20, anchor="w")
+        ctk.CTkLabel(
+            dialog, text="RAM Allocation:",
+            font=("Segoe UI", 14),
+            text_color=self.colors["text"]
+        ).pack(pady=(10, 5), padx=20, anchor="w")
+
         ram_var = ctk.StringVar(value="2G")
         ram_menu = ctk.CTkOptionMenu(
             dialog,
             values=["1G", "2G", "4G", "6G", "8G", "12G", "16G"],
             variable=ram_var,
-            width=340
+            width=340,
+            fg_color=self.colors["element"],
+            button_color=self.colors["border"],
+            button_hover_color=self._darken_color(self.colors["border"], 0.75),
+            text_color=self.colors["text"],
+            dropdown_fg_color=self.colors["element"],
+            dropdown_text_color=self.colors["text"],
+            dropdown_hover_color=self.colors["border"]
         )
         ram_menu.pack(padx=20, pady=5)
 
         # Max Players
-        ctk.CTkLabel(dialog, text="Max Players:", font=("Segoe UI", 14)).pack(pady=(10, 5), padx=20, anchor="w")
-        players_entry = ctk.CTkEntry(dialog, width=340)
+        ctk.CTkLabel(
+            dialog, text="Max Players:",
+            font=("Segoe UI", 14),
+            text_color=self.colors["text"]
+        ).pack(pady=(10, 5), padx=20, anchor="w")
+
+        players_entry = ctk.CTkEntry(
+            dialog, width=340,
+            fg_color=self.colors["element"],
+            text_color=self.colors["text"],
+            border_color=self.colors["border"]
+        )
         players_entry.pack(padx=20, pady=5)
         players_entry.insert(0, "20")
 
-        # Create button
+        # Create btn
         create_btn = ctk.CTkButton(
             dialog,
             text="Create Server",
@@ -657,12 +932,12 @@ class ServersView(ctk.CTkFrame):
             height=36,
             fg_color=self.colors["green"],
             text_color="#05261C",
-            font=("Segoe UI", 14, "bold"),
+            font=("Segoe UI", 14),
+            hover_color=self._darken_color(self.colors["green"], 0.75),
             state="disabled"
         )
         create_btn.pack(pady=(20, 30))
 
-        # --- Fetch versions in background ---
         def fetch_versions():
             type_val = type_var.get()
             versions = []
@@ -684,7 +959,6 @@ class ServersView(ctk.CTkFrame):
                     versions.sort(key=lambda s: [int(x) for x in s.split('.')], reverse=True)
                 except:
                     versions = ["1.21.1", "1.20.4", "1.19.4", "1.18.2"]
-
             dialog.after(0, lambda: update_version_menu(versions))
 
         def update_version_menu(versions):
@@ -699,23 +973,17 @@ class ServersView(ctk.CTkFrame):
 
         threading.Thread(target=fetch_versions, daemon=True).start()
 
-        # --- Create server ---
         def create_server():
             name = name_entry.get().strip()
             if not name:
                 messagebox.showerror("Error", "Please enter a server name.")
                 return
-
             server_type = type_var.get()
             version = version_var.get()
             if not version or version == "No versions found":
                 messagebox.showerror("Error", "Please select a valid version.")
                 return
-
-            ram = ram_var.get()
-            if not ram:
-                ram = "2G"
-
+            ram = ram_var.get() or "2G"
             try:
                 max_players = int(players_entry.get().strip())
                 if max_players < 1:
@@ -723,16 +991,16 @@ class ServersView(ctk.CTkFrame):
             except ValueError:
                 max_players = 20
 
-            # Close the dialog
             dialog.destroy()
 
-            # Create a progress window
             progress_win = ctk.CTkToplevel(self)
             progress_win.title("Creating Server")
             progress_win.geometry("400x150")
             progress_win.resizable(False, False)
             progress_win.transient(self)
             progress_win.grab_set()
+            progress_win.configure(fg_color=self.colors["bg"])
+            progress_win.iconbitmap(resource_path("images/logo.ico"))
 
             x2 = (progress_win.winfo_screenwidth() // 2) - 200
             y2 = (progress_win.winfo_screenheight() // 2) - 75
@@ -746,11 +1014,16 @@ class ServersView(ctk.CTkFrame):
             )
             progress_label.pack(pady=(20, 10))
 
-            progress_bar = ctk.CTkProgressBar(progress_win, width=340, height=12)
+            progress_bar = ctk.CTkProgressBar(
+                progress_win,
+                width=340,
+                height=12,
+                fg_color=self.colors["element"],
+                progress_color=self.colors["green"]
+            )
             progress_bar.pack(pady=10)
             progress_bar.set(0)
 
-            # Run the creation in a thread
             def create_thread():
                 try:
                     success, server_path = self._create_server(
@@ -759,9 +1032,7 @@ class ServersView(ctk.CTkFrame):
                         progress_bar, progress_label, progress_win
                     )
                     if success:
-                        # Destroy progress window and refresh list
                         progress_win.after(0, progress_win.destroy)
-                        # Schedule refresh after a short delay to let the window close
                         self.after(100, self.refresh_servers)
                         messagebox.showinfo("Success", f"Server '{name}' created successfully!")
                 except Exception as e:
@@ -846,7 +1117,7 @@ class ServersView(ctk.CTkFrame):
                         )
         progress_bar.set(0.9)
 
-        # Write server.properties
+        # server.properties
         props_path = os.path.join(server_folder, "server.properties")
         with open(props_path, "w") as f:
             f.write("server-port=25565\n")
@@ -858,7 +1129,7 @@ class ServersView(ctk.CTkFrame):
             f.write("online-mode=true\n")
             f.write("enable-query=true\n")
 
-        # eula.txt – auto-accept
+        # eula.txt
         eula_path = os.path.join(server_folder, "eula.txt")
         with open(eula_path, "w") as f:
             f.write("eula=true\n")
@@ -875,15 +1146,11 @@ class ServersView(ctk.CTkFrame):
 
         progress_label.configure(text="Done!")
         progress_bar.set(1.0)
-
-        # Small delay so the user sees the "Done!" message
         time.sleep(0.5)
-
         return True, server_folder
 
-    # ----- Cleanup when view is destroyed (only cancels after jobs) -----
+    # Cleanup crew :P
     def destroy(self):
-        # Cancel all pending polling jobs
         for path, after_id in list(self.poll_jobs.items()):
             if after_id:
                 self.after_cancel(after_id)

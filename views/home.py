@@ -3,6 +3,9 @@ import os
 import json
 import psutil
 import threading
+import time
+import socket
+import requests
 from mcstatus import JavaServer
 
 class HomeView(ctk.CTkFrame):
@@ -13,6 +16,15 @@ class HomeView(ctk.CTkFrame):
         self.selected_server_path = None
         self.poll_after_id = None
         self._destroyed = False
+
+        # IP visibility flags
+        self.show_local_ip = False
+        self.show_public_ip = False
+
+        # Public IP cache
+        self._cached_public_ip = None
+        self._public_ip_fetch_time = 0
+
         self.configure(fg_color="transparent")
 
         self.grid_columnconfigure(0, weight=1, uniform="rows")
@@ -21,10 +33,10 @@ class HomeView(ctk.CTkFrame):
         self.grid_rowconfigure(1, weight=1, uniform="rows")
         self.grid_rowconfigure(2, weight=1, uniform="rows")
 
-        # --- TOP ROW ---
+        # TOP ROW
         welcome_frame = ctk.CTkFrame(
             self,
-            height=80,
+            height=70,
             corner_radius=15,
             fg_color=self.colors["element"],
             border_color=self.colors["border"],
@@ -33,7 +45,7 @@ class HomeView(ctk.CTkFrame):
         welcome_frame.grid(column=0, row=0, columnspan=2, padx=0, pady=(0, 8), sticky="nsew")
         welcome_frame.grid_propagate(False)
 
-        # --- MIDDLE ROW ---
+        # MID ROW
         ram_frame = ctk.CTkFrame(
             self,
             corner_radius=15,
@@ -54,7 +66,7 @@ class HomeView(ctk.CTkFrame):
         tps_frame.grid(column=1, row=1, padx=(8, 0), pady=8, sticky="nsew")
         tps_frame.grid_propagate(False)
 
-        # --- BOTTOM ROW ---
+        # BOT ROW
         players_frame = ctk.CTkFrame(
             self,
             corner_radius=15,
@@ -75,20 +87,22 @@ class HomeView(ctk.CTkFrame):
         network_frame.grid(column=1, row=2, padx=(8, 0), pady=(8, 0), sticky="nsew")
         network_frame.grid_propagate(False)
 
-        # === WELCOME FRAME ===
+        # WELCOME FRAME
         welcome_frame.grid_columnconfigure(0, weight=1)
         welcome_frame.grid_rowconfigure(0, weight=0)
         welcome_frame.grid_rowconfigure(1, weight=0)
-        welcome_frame.grid_rowconfigure(2, weight=1)
+        welcome_frame.grid_rowconfigure(2, weight=0)
 
+        # Welcome txt
         welcome_txt = ctk.CTkLabel(
             welcome_frame,
             text="Welcome back!",
             font=("Segoe UI", 28, "bold"),
             text_color=self.colors["text"]
         )
-        welcome_txt.grid(row=0, column=0, sticky="nw", padx=15, pady=(10, 0))
+        welcome_txt.grid(row=0, column=0, sticky="nw", padx=15, pady=(8, 0))
 
+        # Dropdown
         self.server_dropdown_var = ctk.StringVar(value="Select a server")
         self.server_dropdown = ctk.CTkOptionMenu(
             welcome_frame,
@@ -96,18 +110,16 @@ class HomeView(ctk.CTkFrame):
             variable=self.server_dropdown_var,
             command=self.on_server_selected,
             font=("Segoe UI", 15),
-            width=200,
+            width=140,
             fg_color=self.colors["bg"],
             button_color=self.colors["border"],
             button_hover_color=self.colors["element"]
         )
-        self.server_dropdown.grid(row=1, column=0, sticky="nw", padx=15, pady=(0, 40))
+        self.server_dropdown.grid(row=1, column=0, sticky="nw", padx=15, pady=(5, 15))
 
+        # Info container (Server, Backups, Update)
         info_container = ctk.CTkFrame(welcome_frame, fg_color="transparent")
-        info_container.grid(row=2, column=0, sticky="nsew", padx=15, pady=10)
-        info_container.grid_rowconfigure(0, weight=1)
-        info_container.grid_rowconfigure(1, weight=1)
-        info_container.grid_rowconfigure(2, weight=1)
+        info_container.grid(row=2, column=0, sticky="nw", padx=15, pady=(0, 10))
         info_container.grid_columnconfigure(0, weight=1)
 
         self.server_status_txt = ctk.CTkLabel(
@@ -116,7 +128,7 @@ class HomeView(ctk.CTkFrame):
             text_color=self.colors["text_muted"],
             font=("Segoe UI Semibold", 13)
         )
-        self.server_status_txt.grid(row=0, column=0, sticky="w", pady=2)
+        self.server_status_txt.grid(row=0, column=0, sticky="w", pady=1)
 
         self.backups_txt = ctk.CTkLabel(
             info_container,
@@ -124,7 +136,7 @@ class HomeView(ctk.CTkFrame):
             text_color=self.colors["text_muted"],
             font=("Segoe UI Semibold", 13)
         )
-        self.backups_txt.grid(row=1, column=0, sticky="w", pady=2)
+        self.backups_txt.grid(row=1, column=0, sticky="w", pady=1)
 
         self.update_txt = ctk.CTkLabel(
             info_container,
@@ -132,9 +144,9 @@ class HomeView(ctk.CTkFrame):
             text_color=self.colors["text_muted"],
             font=("Segoe UI Semibold", 13)
         )
-        self.update_txt.grid(row=2, column=0, sticky="w", pady=2)
+        self.update_txt.grid(row=2, column=0, sticky="w", pady=1)
 
-        # === RAM FRAME ===
+        # RAM FRAME
         ram_frame.grid_columnconfigure(0, weight=1)
         ram_frame.grid_rowconfigure(0, weight=1)
         ram_frame.grid_rowconfigure(1, weight=1)
@@ -166,7 +178,7 @@ class HomeView(ctk.CTkFrame):
         self.ram_progbar.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 10))
         self.ram_progbar.set(0)
 
-        # === TPS FRAME ===
+        # TPS FRAME
         tps_frame.grid_columnconfigure(0, weight=1)
         tps_frame.grid_rowconfigure(0, weight=1)
         tps_frame.grid_rowconfigure(1, weight=1)
@@ -198,7 +210,7 @@ class HomeView(ctk.CTkFrame):
         tps_progbar.grid(row=2, column=0, sticky="ew", padx=15, pady=(0, 10))
         tps_progbar.set(0)
 
-        # === PLAYERS FRAME ===
+        # PLAYERS FRAME
         players_frame.grid_columnconfigure(0, weight=1)
         players_frame.grid_rowconfigure(0, weight=1)
         players_frame.grid_rowconfigure(1, weight=1)
@@ -210,7 +222,7 @@ class HomeView(ctk.CTkFrame):
             text_color=self.colors["text"],
             font=("Segoe UI", 18, "bold")
         )
-        self.players_title.grid(row=0, column=0, sticky="sw", padx=15)
+        self.players_title.grid(row=0, column=0, sticky="sw", padx=15, pady=(5, 0))
 
         self.player_amount = ctk.CTkLabel(
             players_frame,
@@ -228,11 +240,12 @@ class HomeView(ctk.CTkFrame):
         )
         self.player_detail.grid(row=2, column=0, sticky="nw", padx=15, pady=(0, 10))
 
-        # === NETWORK FRAME ===
+        # NETWORK FRAME
         network_frame.grid_columnconfigure(0, weight=1)
-        network_frame.grid_rowconfigure(0, weight=1)
-        network_frame.grid_rowconfigure(1, weight=1)
-        network_frame.grid_rowconfigure(2, weight=1)
+        network_frame.grid_rowconfigure(0, weight=0)
+        network_frame.grid_rowconfigure(1, weight=0)
+        network_frame.grid_rowconfigure(2, weight=0)
+        network_frame.grid_rowconfigure(3, weight=1)
 
         network_txt = ctk.CTkLabel(
             network_frame,
@@ -240,26 +253,119 @@ class HomeView(ctk.CTkFrame):
             text_color=self.colors["text"],
             font=("Segoe UI", 18, "bold")
         )
-        network_txt.grid(row=0, column=0, sticky="sw", padx=15)
+        network_txt.grid(row=0, column=0, sticky="sw", padx=15, pady=(5, 0))
 
-        upnp_txt = ctk.CTkLabel(
-            network_frame,
-            text="UPnP not connected",
+        # Local IP row
+        local_row = ctk.CTkFrame(network_frame, fg_color="transparent")
+        local_row.grid(row=1, column=0, sticky="w", padx=15, pady=0)
+
+        self.local_ip_label = ctk.CTkLabel(
+            local_row,
+            text="Local: --",
             text_color=self.colors["text_muted"],
             font=("Segoe UI Semibold", 12)
         )
-        upnp_txt.grid(row=1, column=0, sticky="nw", padx=15)
+        self.local_ip_label.pack(side="left", padx=(0, 15))
 
-        port_txt = ctk.CTkLabel(
-            network_frame,
-            text="● Port forwarding needed",
+        self.local_eye_btn = ctk.CTkButton(
+            local_row,
+            text="👁",
+            width=30,
+            height=24,
+            fg_color="transparent",
             text_color=self.colors["text_muted"],
-            font=("Segoe UI Semibold", 13)
+            font=("Segoe UI", 14),
+            hover_color=self.colors["border"],
+            command=self.toggle_local_ip
         )
-        port_txt.grid(row=2, column=0, sticky="nw", padx=15, pady=(0, 10))
+        self.local_eye_btn.pack(side="left", padx=5)
+
+        # Public IP row
+        public_row = ctk.CTkFrame(network_frame, fg_color="transparent")
+        public_row.grid(row=2, column=0, sticky="w", padx=15, pady=0)
+
+        self.public_ip_label = ctk.CTkLabel(
+            public_row,
+            text="Public: --",
+            text_color=self.colors["text_muted"],
+            font=("Segoe UI Semibold", 12)
+        )
+        self.public_ip_label.pack(side="left", padx=(0, 10))
+
+        self.public_eye_btn = ctk.CTkButton(
+            public_row,
+            text="👁",
+            width=30,
+            height=24,
+            fg_color="transparent",
+            text_color=self.colors["text_muted"],
+            font=("Segoe UI", 14),
+            hover_color=self.colors["border"],
+            command=self.toggle_public_ip
+        )
+        self.public_eye_btn.pack(side="left", padx=5)
+
+        # Store current IP strings
+        self._local_ip = None
+        self._public_ip = None
+        self._port = None
 
         self.refresh_servers()
 
+    # IP toggle
+    def toggle_local_ip(self):
+        self.show_local_ip = not self.show_local_ip
+        self._update_local_ip_label()
+
+    def toggle_public_ip(self):
+        self.show_public_ip = not self.show_public_ip
+        self._update_public_ip_label()
+
+    def _update_local_ip_label(self):
+        if self._local_ip and self._port:
+            if self.show_local_ip:
+                self.local_ip_label.configure(text=f"Local: {self._local_ip}:{self._port}")
+            else:
+                self.local_ip_label.configure(text="Local: ***.***.***.***")
+
+    def _update_public_ip_label(self):
+        if self._public_ip and self._port:
+            if self.show_public_ip:
+                self.public_ip_label.configure(text=f"Public: {self._public_ip}:{self._port}")
+            else:
+                self.public_ip_label.configure(text="Public: ***.***.***.***")
+
+    def _update_ip_labels(self):
+        self._update_local_ip_label()
+        self._update_public_ip_label()
+
+    # IP
+    def _get_local_ip(self):
+        try:
+            hostname = socket.gethostname()
+            ip_list = socket.gethostbyname_ex(hostname)[2]
+            for ip in ip_list:
+                if not ip.startswith("127.") and "." in ip:
+                    return ip
+        except:
+            pass
+        return "Unknown"
+
+    def _get_public_ip(self):
+        now = time.time()
+        if self._cached_public_ip and (now - self._public_ip_fetch_time) < 300:
+            return self._cached_public_ip
+        try:
+            response = requests.get("https://api.ipify.org", timeout=3)
+            if response.status_code == 200:
+                self._cached_public_ip = response.text.strip()
+                self._public_ip_fetch_time = now
+                return self._cached_public_ip
+        except:
+            pass
+        return self._cached_public_ip or "Unknown"
+
+    # Refresh dropdown
     def refresh_servers(self):
         if self._destroyed:
             return
@@ -317,6 +423,11 @@ class HomeView(ctk.CTkFrame):
         self.ram_progbar.set(0)
         self.player_amount.configure(text="-- online")
         self.player_detail.configure(text="● --/--")
+        self.local_ip_label.configure(text="Local: --")
+        self.public_ip_label.configure(text="Public: --")
+        self._local_ip = None
+        self._public_ip = None
+        self._port = None
 
     def start_polling(self):
         if self.poll_after_id:
@@ -355,19 +466,31 @@ class HomeView(ctk.CTkFrame):
             except Exception:
                 pass
 
-        if self.winfo_exists() and not self._destroyed:
-            self.after(0, lambda: self._update_ui(ram, is_running, players, max_players))
+        local_ip = self._get_local_ip()
+        public_ip = self._get_public_ip()
 
-    def _update_ui(self, ram, is_running, players, max_players):
+        if self.winfo_exists() and not self._destroyed:
+            self.after(0, lambda: self._update_ui(ram, is_running, players, max_players, port, local_ip, public_ip))
+
+    def _update_ui(self, ram, is_running, players, max_players, port, local_ip, public_ip):
         if not self.winfo_exists() or self._destroyed:
             return
+
+        # Store IPs for toggle
+        self._local_ip = local_ip
+        self._public_ip = public_ip
+        self._port = port
+
+        # RAM
         self.ram_amount.configure(text=f"RAM - {ram}")
 
+        # Server status
         if is_running:
             self.server_status_txt.configure(text="● Server: Running", text_color=self.colors["green"])
         else:
             self.server_status_txt.configure(text="● Server: Stopped", text_color=self.colors["text_muted"])
 
+        # Players
         if players is not None and max_players is not None:
             self.player_amount.configure(text=f"{players} online")
             self.player_detail.configure(text=f"● {players}/{max_players}")
@@ -379,10 +502,14 @@ class HomeView(ctk.CTkFrame):
                 self.player_amount.configure(text="0 online")
                 self.player_detail.configure(text="● 0/--")
 
+        # Update IP labels based on individual toggle states
+        self._update_ip_labels()
+
+        # RAM usage (placeholder)
         self.ram_percent.configure(text="--")
         self.ram_progbar.set(0)
 
-    # ----- Helpers -----
+    # Helperz
     def get_ram_for_server(self, server_path):
         ram = "2G"
         falkmc_path = os.path.join(server_path, "falkmc.json")

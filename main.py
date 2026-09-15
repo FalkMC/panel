@@ -1,16 +1,30 @@
 import os
 import sys
+import psutil
+
 import customtkinter as ctk
 from PIL import Image
 
-# ----- Our modules -----
+# Modules
 from settings import load_settings, save_settings
 from theme import THEME_COLORS
 from resource import resource_path
 
-# ----- Import views -----
+# Import views
 from views.home import HomeView
 from views.servers import ServersView
+
+# Folder in docs dir
+DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
+FALKMC_DIR = os.path.join(DOCUMENTS_DIR, "FalkMC")
+os.makedirs(FALKMC_DIR, exist_ok=True)
+
+# Get logo path
+if getattr(sys, 'frozen', False):
+    icon_path = os.path.join(sys._MEIPASS, "images", "logo.ico")
+else:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(script_dir, "images", "logo.ico")
 
 
 class App(ctk.CTk):
@@ -20,15 +34,11 @@ class App(ctk.CTk):
         # Load settings and apply them
         self.settings = load_settings()
         theme_name = self.settings.get("theme", "dark")
+        self.iconbitmap(icon_path)
         self.colors = THEME_COLORS[theme_name]
 
-        # Base dir
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-
-        self.servers_base = os.path.join(base_dir, "servers")
+        # Servers folder lives inside Documents\FalkMC\servers
+        self.servers_base = os.path.join(FALKMC_DIR, "servers")
 
         ctk.set_appearance_mode(theme_name)
         ctk.set_default_color_theme("green")
@@ -39,21 +49,23 @@ class App(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
 
         # Grid layout
-        self.grid_columnconfigure(0, weight=0)      # sidebar
-        self.grid_columnconfigure(1, weight=1)      # content
-        self.grid_columnconfigure(2, weight=0)      # right spacer (for theme button)
-        self.grid_rowconfigure(0, weight=0)         # header
-        self.grid_rowconfigure(1, weight=1)         # main content
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(2, weight=0)
+        self.grid_rowconfigure(0, weight=0)
+        self.grid_rowconfigure(1, weight=1)
+
+        self.current_view_name = "home"
 
         self.create_header()
         self.create_navbar()
         self.create_content_area()
 
-        # Load default view (Home)
-        self.show_view("home")
+        # Load def view (Home)
+        self.show_view(self.current_view_name)
 
     def create_header(self):
-        # Logo/name pill (left)
+        # Logo pill
         name_pill = ctk.CTkFrame(
             self,
             height=50,
@@ -95,28 +107,30 @@ class App(ctk.CTk):
         )
         beta_label.pack(side="right", padx=(5, 10), pady=10)
 
-        # Center "Home" label
-        home_label = ctk.CTkLabel(
+        # Header label
+        self.header_label = ctk.CTkLabel(
             self,
             text="Home",
             font=("Segoe UI", 21),
             text_color=self.colors["text_muted"]
         )
-        home_label.grid(column=1, row=0, padx=0, pady=0, sticky="ns")
+        self.header_label.grid(column=1, row=0, padx=0, pady=0, sticky="ns")
 
-        # Theme toggle button (right)
-        theme_btn = ctk.CTkButton(
+        # Theme toggle btn
+        self.theme_btn = ctk.CTkButton(
             self,
-            height=40,
-            width=40,
+            height=50,
+            width=50,
             fg_color=self.colors["element"],
             hover_color=self.colors["border"],
             text="◐",
-            corner_radius=15,
+            font=("Segoe UI", 24),
+            corner_radius=12,
             border_color=self.colors["border"],
-            border_width=1
+            border_width=1,
+            command=lambda: None        # REMEMBER: Add functionallity later!! :DD
         )
-        theme_btn.grid(column=2, row=0, padx=(0, 20), pady=20, sticky="e")
+        self.theme_btn.grid(column=2, row=0, padx=(0, 20), pady=(20, 0), sticky="e")
 
     def create_navbar(self):
         nav_frame = ctk.CTkFrame(
@@ -186,7 +200,14 @@ class App(ctk.CTk):
 
         # Switch the view based on the selected nav item
         view_map = ["home", "servers", "console", "backups", "settings"]
-        self.show_view(view_map[index])
+        view_name = view_map[index]
+        self.current_view_name = view_name
+        self.update_header(view_name)
+        self.show_view(view_name)
+
+    def update_header(self, view_name):
+        display_name = view_name.capitalize()
+        self.header_label.configure(text=display_name)
 
     def create_content_area(self):
         self.content_frame = ctk.CTkFrame(
@@ -197,11 +218,13 @@ class App(ctk.CTk):
         self.content_frame.grid_columnconfigure(0, weight=1)
         self.content_frame.grid_rowconfigure(0, weight=1)
 
-    # Destroy current view + create new
+    # Destroy current view + schedule new one
     def show_view(self, view_name):
         for widget in self.content_frame.winfo_children():
             widget.destroy()
+        self.after(10, lambda: self._build_view(view_name))
 
+    def _build_view(self, view_name):
         if view_name == "home":
             view = HomeView(self.content_frame, self.colors, self.servers_base)
         elif view_name == "servers":
@@ -213,17 +236,39 @@ class App(ctk.CTk):
                 font=("Segoe UI", 24),
                 text_color=self.colors["text_muted"]
             )
-
         view.grid(row=0, column=0, sticky="nsew")
 
     def on_closing(self):
+        # Kill any Minecraft servers started by FalkMC
+        servers_base = self.servers_base
+        for proc in psutil.process_iter(['pid', 'cmdline', 'cwd']):
+            try:
+                cmdline = proc.info.get('cmdline')
+                cwd = proc.info.get('cwd')
+                if not cmdline or not cwd:
+                    continue
+                if "java" in cmdline[0].lower() and "server.jar" in " ".join(cmdline):
+                    # Only kill servers that live inside our servers_base folder
+                    if cwd.startswith(servers_base):
+                        try:
+                            proc.terminate()
+                            proc.wait(timeout=5)
+                        except (psutil.TimeoutExpired, psutil.NoSuchProcess):
+                            try:
+                                proc.kill()
+                            except:
+                                pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                pass
+
+        # Save window size and settings
         self.settings["window_width"] = self.winfo_width()
         self.settings["window_height"] = self.winfo_height()
         save_settings(self.settings)
         self.destroy()
 
 
-# ----- Splash screen logic -----
+# Splash screen logic
 def run():
     # Create the main app window (hidden)
     app = App()
@@ -234,11 +279,19 @@ def run():
     splash.overrideredirect(True)
     splash.configure(fg_color="#000000")
 
+    splash_width = 600
+    splash_height = 315
+    progress_bar_height = 4
+    progress_bar_y = splash_height - progress_bar_height - 8
+
+    # Use dark theme colors (splash is always dark)
+    dark_colors = THEME_COLORS["dark"]
+
     cover_path = resource_path("images/FalkMC_Cover.png")
     try:
         cover_img = ctk.CTkImage(light_image=Image.open(cover_path),
                                  dark_image=Image.open(cover_path),
-                                 size=(735, 386))
+                                 size=(splash_width, splash_height))
         image_label = ctk.CTkLabel(splash, image=cover_img, text="")
         image_label.place(x=0, y=0, relwidth=1, relheight=1)
     except Exception:
@@ -247,15 +300,21 @@ def run():
                                 text_color="white")
         fallback.pack(expand=True)
 
-    bar_height = 12
-    bar_y = 386 - bar_height - 8
-    progress = ctk.CTkProgressBar(splash, width=735, height=bar_height, corner_radius=0)
-    progress.place(x=0, y=bar_y)
+    # Progress bar – using existing theme color list
+    progress = ctk.CTkProgressBar(
+        splash,
+        width=splash_width,
+        height=progress_bar_height,
+        corner_radius=2,
+        progress_color=dark_colors["green"],
+        fg_color=dark_colors["element"]
+    )
+    progress.place(x=0, y=progress_bar_y)
     progress.set(0)
 
-    x = (splash.winfo_screenwidth() // 2) - (735 // 2)
-    y = (splash.winfo_screenheight() // 2) - (386 // 2)
-    splash.geometry(f"735x386+{x}+{y}")
+    x = (splash.winfo_screenwidth() // 2) - (splash_width // 2)
+    y = (splash.winfo_screenheight() // 2) - (splash_height // 2)
+    splash.geometry(f"{splash_width}x{splash_height}+{x}+{y}")
 
     splash.transient(app)
     splash.grab_set()

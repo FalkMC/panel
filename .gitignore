@@ -12,3 +12,12 @@ Thumbs.db
 servers/
 *.db
 *.sqlite3
+
+# Build artifacts
+dist/
+build/
+*.spec
+nuitka-crash-report.xml
+main.dist/
+main.build/
+main.onefile-build/

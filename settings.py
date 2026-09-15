@@ -1,25 +1,18 @@
 import os
-import sys
 import json
 
-# Dir where its located, settings.json lives here
-def get_app_dir():
-    if getattr(sys, 'frozen', False):
-        # Running as .exe – settings go next to the .exe
-        return os.path.dirname(sys.executable)
-    else:
-        # Running as script – settings go next to main.py
-        return os.path.dirname(os.path.abspath(__file__))
+DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
+FALKMC_DIR = os.path.join(DOCUMENTS_DIR, "FalkMC")
+os.makedirs(FALKMC_DIR, exist_ok=True)
 
-APP_DIR = get_app_dir()
-SETTINGS_PATH = os.path.join(APP_DIR, "settings.json")
+SETTINGS_PATH = os.path.join(FALKMC_DIR, "settings.json")
 VERSION = 1
 
 DEFAULT_SETTINGS = {
     "version": VERSION,
     "theme": "dark",
-    "window_width": 1152,
-    "window_height": 648
+    "window_width": 1000,
+    "window_height": 545
 }
 
 def load_settings():
