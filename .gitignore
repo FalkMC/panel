@@ -12,6 +12,7 @@ Thumbs.db
 servers/
 *.db
 *.sqlite3
+settings.json
 
 # Build artifacts
 dist/
