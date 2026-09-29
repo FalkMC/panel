@@ -13,11 +13,14 @@ class ConsoleView(ctk.CTkFrame):
         self.selected_server_path = None
         self.auto_scroll = True
 
-        self.log_position = 0      # how far we read into the log file
-        self.log_poll_job = None   # id of the scheduled next poll
+        self.log_position = 0
+        self.log_poll_job = None
+        self.servers_check_job = None
+        self.current_servers = None
 
         self.build_ui()
         self.refresh_server_list()
+        self._check_servers_changed()
 
     # ============================================================
     #   COLOUR DARKENING THINGG
@@ -38,11 +41,9 @@ class ConsoleView(ctk.CTkFrame):
     # ============================================================
 
     def build_ui(self):
-        # Single top bar: server dropdown + auto-scroll + clear
         top_frame = ctk.CTkFrame(self, fg_color="transparent")
         top_frame.pack(fill="x", pady=(0, 10))
 
-        # Server dropdown
         self.server_dropdown_var = ctk.StringVar(value="Select a server")
         self.server_dropdown = ctk.CTkOptionMenu(
             top_frame,
@@ -61,7 +62,6 @@ class ConsoleView(ctk.CTkFrame):
         )
         self.server_dropdown.pack(side="left", padx=(5, 0))
 
-        # Clear button
         clear_btn = ctk.CTkButton(
             top_frame,
             text="Clear",
@@ -74,7 +74,6 @@ class ConsoleView(ctk.CTkFrame):
         )
         clear_btn.pack(side="right", padx=5)
 
-        # Auto-scroll switch
         self.auto_scroll_switch = ctk.CTkSwitch(
             top_frame,
             text="Auto-scroll",
@@ -89,7 +88,6 @@ class ConsoleView(ctk.CTkFrame):
         self.auto_scroll_switch.select()
         self.auto_scroll_switch.pack(side="right", padx=15)
 
-        # Console output area
         console_frame = ctk.CTkFrame(
             self,
             fg_color=self.colors["element"],
@@ -111,7 +109,6 @@ class ConsoleView(ctk.CTkFrame):
         self.console_textbox.pack(fill="both", expand=True, padx=8, pady=8)
         self.console_textbox.configure(state="disabled")
 
-        # Command input row
         input_row = ctk.CTkFrame(self, fg_color="transparent")
         input_row.pack(fill="x")
 
@@ -128,7 +125,7 @@ class ConsoleView(ctk.CTkFrame):
         self.command_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.command_entry.bind("<Return>", lambda e: self.send_command())
 
-        send_btn = ctk.CTkButton(
+        self.send_btn = ctk.CTkButton(
             input_row,
             text="Send",
             width=80,
@@ -139,13 +136,12 @@ class ConsoleView(ctk.CTkFrame):
             hover_color=self._darken_color(self.colors["green"], 0.75),
             command=self.send_command
         )
-        send_btn.pack(side="right")
+        self.send_btn.pack(side="right")
 
     # ============================================================
     #   SERVER LIST
     # ============================================================
 
-    # Scan the servers folder and add to the dropdown
     def refresh_server_list(self):
         servers = []
         if os.path.exists(self.servers_base):
@@ -154,9 +150,15 @@ class ConsoleView(ctk.CTkFrame):
                 if os.path.isdir(path) and os.path.exists(os.path.join(path, "server.jar")):
                     servers.append(item)
 
+        # Only rebuild dropdown if the list actually changed
+        if servers == self.current_servers:
+            return
+
+        self.current_servers = servers
+        current = self.server_dropdown_var.get()
+
         if servers:
             self.server_dropdown.configure(values=servers)
-            current = self.server_dropdown_var.get()
             if current not in servers:
                 self.server_dropdown.set(servers[0])
                 self.on_server_selected(servers[0])
@@ -164,47 +166,55 @@ class ConsoleView(ctk.CTkFrame):
             self.server_dropdown.configure(values=["No servers found"])
             self.server_dropdown.set("No servers found")
             self.selected_server_path = None
+            self._update_input_state()
+
+    # Every 5secs refresh dropdown
+    def _check_servers_changed(self):
+        if not self.winfo_exists():
+            return
+        try:
+            self.refresh_server_list()
+        except Exception as e:
+            print(f"Error checking servers: {e}")
+        self.servers_check_job = self.after(5000, self._check_servers_changed)
 
     def on_server_selected(self, server_name):
         if server_name in ("Select a server", "No servers found"):
             self.selected_server_path = None
+            self._update_input_state()
             return
 
-        # Stop any previous polling
         if self.log_poll_job:
             self.after_cancel(self.log_poll_job)
             self.log_poll_job = None
 
         self.selected_server_path = os.path.join(self.servers_base, server_name)
 
-        # Start fresh: reset position, clear the textbox
         self.log_position = 0
         self.clear_console()
 
-        # Start the reading loop
         self._read_log()
+        self._update_input_state()
 
-    # Read new lines from the log file and print them. Runs every 500ms
+    # ============================================================
+    #   LOG READING
+    # ============================================================
+
     def _read_log(self):
-        # Stop if nothing is selected
         if not self.selected_server_path:
             return
-
-        # Stop if the view is destroyed
         if not self.winfo_exists():
             return
 
         log_path = os.path.join(self.selected_server_path, "falkmc_console.log")
 
-        # If the file doesn't exist yet (server never started), just try again later
         if os.path.exists(log_path):
             try:
                 with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                    f.seek(self.log_position)       # jump to where we stopped last time
-                    new_text = f.read()             # read only the new stuff
-                    self.log_position = f.tell()    # remember where we are now
+                    f.seek(self.log_position)
+                    new_text = f.read()
+                    self.log_position = f.tell()
 
-                # If there was new text, print each line
                 if new_text:
                     for line in new_text.splitlines():
                         self.append_to_console(line)
@@ -212,11 +222,40 @@ class ConsoleView(ctk.CTkFrame):
             except Exception as e:
                 print(f"Error reading log: {e}")
 
-        # Schedule the next check in 500ms
+        # Refresh the input state so we catch server start/stop
+        self._update_input_state()
+
         self.log_poll_job = self.after(500, self._read_log)
 
     # ============================================================
-    #   CONSOLE ACTIONS (placeholder!)
+    #   INPUT STATE
+    # ============================================================
+
+    # Grey out Send btn and disable input when the server isnt running
+    def _update_input_state(self):
+        if not self.selected_server_path:
+            is_running = False
+        else:
+            proc = running_processes.get(self.selected_server_path)
+            is_running = proc is not None and proc.poll() is None
+
+        if is_running:
+            self.send_btn.configure(
+                state="normal",
+                fg_color=self.colors["green"],
+                text_color="#05261C"
+            )
+            self.command_entry.configure(state="normal")
+        else:
+            self.send_btn.configure(
+                state="disabled",
+                fg_color="#555555",
+                text_color="#888888"
+            )
+            self.command_entry.configure(state="disabled")
+
+    # ============================================================
+    #   CONSOLE ACTIONS
     # ============================================================
 
     def clear_console(self):
@@ -227,7 +266,6 @@ class ConsoleView(ctk.CTkFrame):
     def _toggle_auto_scroll(self):
         self.auto_scroll = bool(self.auto_scroll_switch.get())
 
-    # Send command to the selected server stdin
     def send_command(self):
         command = self.command_entry.get().strip()
         if not command:
@@ -253,7 +291,6 @@ class ConsoleView(ctk.CTkFrame):
 
         self.command_entry.delete(0, "end")
 
-    # Add line to the output
     def append_to_console(self, text):
         self.console_textbox.configure(state="normal")
         self.console_textbox.insert("end", text + "\n")
@@ -261,9 +298,15 @@ class ConsoleView(ctk.CTkFrame):
         if self.auto_scroll:
             self.console_textbox.see("end")
 
-    # Stop polling when this view is destroyed
+    # ============================================================
+    #   CLEANUP
+    # ============================================================
+
     def destroy(self):
         if self.log_poll_job:
             self.after_cancel(self.log_poll_job)
             self.log_poll_job = None
+        if self.servers_check_job:
+            self.after_cancel(self.servers_check_job)
+            self.servers_check_job = None
         super().destroy()
