@@ -15,6 +15,7 @@ from mcstatus import JavaServer
 from views.settings_dialog import ServerSettingsDialog
 from views.java import find_java, get_java_version
 from views.new_server_dialog import show_new_server_dialog
+from views.server_registry import running_processes
 
 
 class ServersView(ctk.CTkFrame):
@@ -41,7 +42,7 @@ class ServersView(ctk.CTkFrame):
         self.refresh_servers()
 
     # ============================================================
-    #   UI CONSTRUCTION
+    #   UI CREATION
     # ============================================================
 
     def build_ui(self):
@@ -163,7 +164,7 @@ class ServersView(ctk.CTkFrame):
         return port
 
     # ============================================================
-    #   SERVER SCANNING
+    #   SERVER SCAN
     # ============================================================
 
     def refresh_servers(self):
@@ -277,7 +278,7 @@ class ServersView(ctk.CTkFrame):
         return False
 
     # ============================================================
-    #   SERVER CARD
+    #   SERVER CARDS
     # ============================================================
 
     def add_server_card(self, server_name, server_path, port, motd, is_running, ram="2G"):
@@ -621,6 +622,7 @@ class ServersView(ctk.CTkFrame):
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             self.server_processes[server_path] = proc
+            running_processes[server_path] = proc
             self.update_card_status(card, running=True)
             print(f"Started server at {server_path} with Java: {java_path}, RAM: {ram}")
 
@@ -639,6 +641,7 @@ class ServersView(ctk.CTkFrame):
                 self.stop_player_poll(server_path)
                 if server_path in self.server_processes:
                     del self.server_processes[server_path]
+                running_processes.pop(server_path, None)
                 full_error = f"LOG:\n{error_output}"
                 if "UnsupportedClassVersionError" in error_output:
                     match = re.search(r'version (\d+)\.0', error_output)
@@ -666,6 +669,7 @@ class ServersView(ctk.CTkFrame):
             self.update_card_status(card, running=False)
             if server_path in self.server_processes:
                 del self.server_processes[server_path]
+            running_processes.pop(server_path, None)
 
     def stop_server(self, server_path, card):
         proc = self.server_processes.get(server_path)
@@ -683,12 +687,14 @@ class ServersView(ctk.CTkFrame):
             self.stop_player_poll(server_path)
             if server_path in self.server_processes:
                 del self.server_processes[server_path]
+            running_processes.pop(server_path, None)
             return
 
         try:
             if proc.poll() is not None:
                 if server_path in self.server_processes:
                     del self.server_processes[server_path]
+                running_processes.pop(server_path, None)
                 self.update_card_status(card, running=False)
                 self.stop_player_poll(server_path)
                 return
@@ -715,6 +721,7 @@ class ServersView(ctk.CTkFrame):
         finally:
             if server_path in self.server_processes:
                 del self.server_processes[server_path]
+            running_processes.pop(server_path, None)
             self.update_card_status(card, running=False)
             self.stop_player_poll(server_path)
             print(f"Stopped server at {server_path}")

@@ -1,6 +1,7 @@
 import customtkinter as ctk
 import os
 
+from views.server_registry import running_processes
 
 class ConsoleView(ctk.CTkFrame):
     def __init__(self, master, colors, servers_base, **kwargs):
@@ -11,6 +12,9 @@ class ConsoleView(ctk.CTkFrame):
 
         self.selected_server_path = None
         self.auto_scroll = True
+
+        self.log_position = 0      # how far we read into the log file
+        self.log_poll_job = None   # id of the scheduled next poll
 
         self.build_ui()
         self.refresh_server_list()
@@ -166,8 +170,50 @@ class ConsoleView(ctk.CTkFrame):
             self.selected_server_path = None
             return
 
+        # Stop any previous polling
+        if self.log_poll_job:
+            self.after_cancel(self.log_poll_job)
+            self.log_poll_job = None
+
         self.selected_server_path = os.path.join(self.servers_base, server_name)
-        # TODO: hook up log streaming here!!!
+
+        # Start fresh: reset position, clear the textbox
+        self.log_position = 0
+        self.clear_console()
+
+        # Start the reading loop
+        self._read_log()
+
+    # Read new lines from the log file and print them. Runs every 500ms
+    def _read_log(self):
+        # Stop if nothing is selected
+        if not self.selected_server_path:
+            return
+
+        # Stop if the view is destroyed
+        if not self.winfo_exists():
+            return
+
+        log_path = os.path.join(self.selected_server_path, "falkmc_console.log")
+
+        # If the file doesn't exist yet (server never started), just try again later
+        if os.path.exists(log_path):
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                    f.seek(self.log_position)       # jump to where we stopped last time
+                    new_text = f.read()             # read only the new stuff
+                    self.log_position = f.tell()    # remember where we are now
+
+                # If there was new text, print each line
+                if new_text:
+                    for line in new_text.splitlines():
+                        self.append_to_console(line)
+
+            except Exception as e:
+                print(f"Error reading log: {e}")
+
+        # Schedule the next check in 500ms
+        self.log_poll_job = self.after(500, self._read_log)
 
     # ============================================================
     #   CONSOLE ACTIONS (placeholder!)
@@ -187,8 +233,24 @@ class ConsoleView(ctk.CTkFrame):
         if not command:
             return
 
-        # TODO: actually send command to the running server process
-        self.append_to_console(f"> {command}")
+        if not self.selected_server_path:
+            self.append_to_console("⚠ No server selected.")
+            return
+
+        proc = running_processes.get(self.selected_server_path)
+
+        if proc is None or proc.poll() is not None:
+            self.append_to_console("⚠ Server is not running.")
+            return
+
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.write(command + "\n")
+                proc.stdin.flush()
+                self.append_to_console(f"> {command}")
+        except Exception as e:
+            self.append_to_console(f"⚠ Failed to send command: {e}")
+
         self.command_entry.delete(0, "end")
 
     # Add line to the output
@@ -198,3 +260,10 @@ class ConsoleView(ctk.CTkFrame):
         self.console_textbox.configure(state="disabled")
         if self.auto_scroll:
             self.console_textbox.see("end")
+
+    # Stop polling when this view is destroyed
+    def destroy(self):
+        if self.log_poll_job:
+            self.after_cancel(self.log_poll_job)
+            self.log_poll_job = None
+        super().destroy()
