@@ -6,7 +6,7 @@ FALKMC_DIR = os.path.join(DOCUMENTS_DIR, "FalkMC")
 os.makedirs(FALKMC_DIR, exist_ok=True)
 
 SETTINGS_PATH = os.path.join(FALKMC_DIR, "settings.json")
-VERSION = 1
+VERSION = 2
 
 DEFAULT_SETTINGS = {
     "version": VERSION,
