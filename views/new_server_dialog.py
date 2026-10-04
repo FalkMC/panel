@@ -9,6 +9,13 @@ from tkinter import messagebox
 from resource import resource_path
 
 
+# PaperMC API
+PAPER_API_BASE = "https://fill.papermc.io/v3/projects/paper"
+PAPER_HEADERS = {
+    "User-Agent": "FalkMC/0.3.0 (https://github.com/FalkMC/panel)"
+}
+
+
 def show_new_server_dialog(view):
     colors = view.colors
     servers_base = view.servers_base
@@ -143,27 +150,50 @@ def show_new_server_dialog(view):
     )
     create_btn.pack(pady=(20, 30))
 
+    # Fetch versions in a background thread
     def fetch_versions():
         type_val = type_var.get()
         versions = []
+
         if type_val == "Vanilla":
             try:
-                resp = requests.get("https://launchermeta.mojang.com/mc/game/version_manifest.json")
+                resp = requests.get(
+                    "https://launchermeta.mojang.com/mc/game/version_manifest.json",
+                    timeout=10
+                )
                 resp.raise_for_status()
                 data = resp.json()
                 versions = [v["id"] for v in data["versions"] if v["type"] == "release"]
                 versions.sort(key=lambda s: [int(x) for x in s.split('.')], reverse=True)
-            except:
+            except Exception as e:
+                print(f"Vanilla version fetch failed: {e}")
                 versions = ["1.21.1", "1.20.4", "1.19.4", "1.18.2"]
-        else:
+
+        else:  # Paper
             try:
-                resp = requests.get("https://api.papermc.io/v2/projects/paper")
+                resp = requests.get(PAPER_API_BASE, headers=PAPER_HEADERS, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
-                versions = data["versions"]
-                versions.sort(key=lambda s: [int(x) for x in s.split('.')], reverse=True)
-            except:
-                versions = ["1.21.1", "1.20.4", "1.19.4", "1.18.2"]
+
+                raw_versions = data.get("versions", {})
+
+                # v3 returns versions grouped by major: {"1.21": ["1.21.11", "1.21.10", ...]}
+                if isinstance(raw_versions, dict):
+                    for patch_list in raw_versions.values():
+                        versions.extend(patch_list)
+                elif isinstance(raw_versions, list):
+                    # Just in case the API returns a flat list
+                    versions = list(raw_versions)
+
+                # Sort newest first
+                versions.sort(
+                    key=lambda s: [int(x) for x in s.split('.')],
+                    reverse=True
+                )
+            except Exception as e:
+                print(f"Paper version fetch failed: {e}")
+                versions = ["1.21.11", "1.21.8", "1.21.4", "1.21.1", "1.20.6", "1.20.4"]
+
         dialog.after(0, lambda: update_version_menu(versions))
 
     def update_version_menu(versions):
@@ -178,16 +208,19 @@ def show_new_server_dialog(view):
 
     threading.Thread(target=fetch_versions, daemon=True).start()
 
+    # Handle Create button
     def create_server():
         name = name_entry.get().strip()
         if not name:
             messagebox.showerror("Error", "Please enter a server name.")
             return
+
         server_type = type_var.get()
         version = version_var.get()
         if not version or version == "No versions found":
             messagebox.showerror("Error", "Please select a valid version.")
             return
+
         ram = ram_var.get() or "2G"
         try:
             max_players = int(players_entry.get().strip())
@@ -259,44 +292,92 @@ def _create_server(servers_base, name, server_type, version, ram_allocation, max
         return False, None
 
     jar_url = None
+
+    # ============================================================
+    #   VANILLA
+    # ============================================================
     if server_type == "Vanilla":
         progress_label.configure(text="Fetching manifest...")
         progress_bar.set(0.1)
+
         manifest_url = "https://launchermeta.mojang.com/mc/game/version_manifest.json"
-        resp = requests.get(manifest_url)
+        resp = requests.get(manifest_url, timeout=10)
         resp.raise_for_status()
         data = resp.json()
+
         version_info = None
         for v in data["versions"]:
             if v["id"] == version:
                 version_info = v
                 break
+
         if not version_info:
             progress_win.after(0, progress_win.destroy)
             messagebox.showerror("Error", f"Version {version} not found.")
             return False, None
+
         progress_label.configure(text="Fetching version details...")
         progress_bar.set(0.2)
+
         version_detail_url = version_info["url"]
-        resp = requests.get(version_detail_url)
+        resp = requests.get(version_detail_url, timeout=10)
         resp.raise_for_status()
         detail = resp.json()
         jar_url = detail["downloads"]["server"]["url"]
 
+    # ============================================================
+    #   PAPER
+    # ============================================================
     elif server_type == "Paper":
-        progress_label.configure(text="Fetching Paper build...")
+        progress_label.configure(text="Fetching Paper builds...")
         progress_bar.set(0.1)
-        api_url = f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds/latest"
-        resp = requests.get(api_url)
+
+        builds_url = f"{PAPER_API_BASE}/versions/{version}/builds"
+        resp = requests.get(builds_url, headers=PAPER_HEADERS, timeout=10)
+
         if resp.status_code != 200:
             progress_win.after(0, progress_win.destroy)
-            messagebox.showerror("Error", f"Paper version {version} not found.")
+            messagebox.showerror(
+                "Error",
+                f"Could not fetch Paper builds for {version}.\n\n"
+                f"HTTP {resp.status_code}"
+            )
             return False, None
-        data = resp.json()
-        build = data["build"]
-        file_name = data["downloads"]["application"]["name"]
-        jar_url = f"https://api.papermc.io/v2/projects/paper/versions/{version}/builds/{build}/downloads/{file_name}"
 
+        builds = resp.json()
+
+        if not isinstance(builds, list) or not builds:
+            progress_win.after(0, progress_win.destroy)
+            messagebox.showerror("Error", f"No Paper builds found for {version}.")
+            return False, None
+
+        # Prefer STABLE builds; fall back to any build if none are stable
+        stable_builds = [b for b in builds if b.get("channel") == "STABLE"]
+        pool = stable_builds if stable_builds else builds
+
+        latest = max(pool, key=lambda b: b["id"])
+        build_number = latest["id"]
+
+        # v3 embeds the download URL — don't construct it ourselves
+        downloads = latest.get("downloads", {})
+        server_download = downloads.get("server:default")
+
+        if not server_download or not server_download.get("url"):
+            progress_win.after(0, progress_win.destroy)
+            messagebox.showerror(
+                "Error",
+                f"Paper build #{build_number} has no server download available."
+            )
+            return False, None
+
+        jar_url = server_download["url"]
+
+        progress_label.configure(text=f"Found build #{build_number}")
+        progress_bar.set(0.2)
+
+    # ============================================================
+    #   DOWNLOAD
+    # ============================================================
     if not jar_url:
         progress_win.after(0, progress_win.destroy)
         messagebox.showerror("Error", "Could not determine download URL.")
@@ -306,12 +387,15 @@ def _create_server(servers_base, name, server_type, version, ram_allocation, max
 
     progress_label.configure(text=f"Downloading {server_type} server...")
     progress_bar.set(0.3)
+
     jar_path = os.path.join(server_folder, "server.jar")
-    response = requests.get(jar_url, stream=True)
+    response = requests.get(jar_url, stream=True, timeout=30)
     response.raise_for_status()
+
     total_size = int(response.headers.get('content-length', 0))
     block_size = 1024 * 1024
     downloaded = 0
+
     with open(jar_path, "wb") as f:
         for chunk in response.iter_content(chunk_size=block_size):
             if chunk:
@@ -323,6 +407,7 @@ def _create_server(servers_base, name, server_type, version, ram_allocation, max
                     progress_label.configure(
                         text=f"Downloading... {int(100 * downloaded / total_size)}%"
                     )
+
     progress_bar.set(0.9)
 
     # server.properties
@@ -349,10 +434,13 @@ def _create_server(servers_base, name, server_type, version, ram_allocation, max
             "display_name": name,
             "ram_allocation": ram_allocation,
             "java_path": "",
-            "icon_path": ""
+            "icon_path": "",
+            "server_type": server_type,
+            "minecraft_version": version
         }, f, indent=2)
 
     progress_label.configure(text="Done!")
     progress_bar.set(1.0)
     time.sleep(0.5)
+
     return True, server_folder
