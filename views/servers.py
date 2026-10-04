@@ -215,6 +215,7 @@ class ServersView(ctk.CTkFrame):
                     if os.path.exists(os.path.join(server_path, "server.jar")):
                         port = "25565"
                         motd = "A Minecraft Server"
+                        max_players = "20"
                         props_path = os.path.join(server_path, "server.properties")
                         if os.path.exists(props_path):
                             with open(props_path, "r") as f:
@@ -224,12 +225,15 @@ class ServersView(ctk.CTkFrame):
                                         port = line.split("=")[1]
                                     elif line.startswith("motd="):
                                         motd = line.split("=")[1]
+                                    elif line.startswith("max-players="):
+                                        max_players = line.split("=")[1]
                         is_running = server_path in running_paths
                         servers_data.append({
                             "name": item,
                             "path": server_path,
                             "port": port,
                             "motd": motd,
+                            "max_players": max_players,
                             "running": is_running
                         })
         if self.winfo_exists() and not self._destroyed:
@@ -259,7 +263,8 @@ class ServersView(ctk.CTkFrame):
                     data["port"],
                     data["motd"],
                     data["running"],
-                    ram
+                    ram,
+                    data["max_players"]
                 )
         self.scanning = False
 
@@ -281,7 +286,7 @@ class ServersView(ctk.CTkFrame):
     #   SERVER CARDS
     # ============================================================
 
-    def add_server_card(self, server_name, server_path, port, motd, is_running, ram="2G"):
+    def add_server_card(self, server_name, server_path, port, motd, is_running, ram="2G", max_players="20"):
         card = ctk.CTkFrame(
             self.scrollable_frame,
             fg_color=self.colors["element"],
@@ -321,7 +326,7 @@ class ServersView(ctk.CTkFrame):
 
         info_label = ctk.CTkLabel(
             card,
-            text=f"0/20 players  •  {ram} RAM",
+            text=f"0/{max_players} players  •  {ram} RAM",
             font=("Segoe UI", 12),
             text_color=self.colors["text_muted"]
         )
