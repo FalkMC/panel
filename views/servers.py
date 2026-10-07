@@ -9,6 +9,7 @@ import threading
 import webbrowser
 import re
 import socket
+import shutil
 from tkinter import messagebox
 from mcstatus import JavaServer
 
@@ -453,6 +454,18 @@ class ServersView(ctk.CTkFrame):
         )
         settings_btn.pack(side="left", padx=2)
 
+        delete_btn = ctk.CTkButton(
+            controls_frame,
+            text="X",
+            width=30,
+            height=28,
+            fg_color="#e74c3c",
+            text_color="white",
+            hover_color=self._darken_color("#e74c3c", 0.75),
+            command=lambda: self.delete_server(server_path, card)
+        )
+        delete_btn.pack(side="left", padx=2)
+
         card.server_path = server_path
         card.status_label = status_label
         card.info_label = info_label
@@ -742,6 +755,42 @@ class ServersView(ctk.CTkFrame):
     def open_settings(self, server_path):
         dialog = ServerSettingsDialog(self, self.colors, server_path)
         dialog.wait_window()
+        self.refresh_servers()
+
+    def delete_server(self, server_path, card):
+        server_name = os.path.basename(server_path)
+
+        # Ask for confirmation
+        result = messagebox.askyesno(
+            "Delete Server",
+            f"Are you sure you want to delete '{server_name}'?\n\n"
+            "This cannot be undone. The world, config, and all files will be permanently removed."
+        )
+        if not result:
+            return
+
+        # If the server is running, stop it first
+        if self.is_server_running(server_path):
+            self.stop_server(server_path, card)
+            time.sleep(1)
+
+        # Clean up state
+        self.stop_player_poll(server_path)
+        if server_path in self.server_processes:
+            del self.server_processes[server_path]
+        running_processes.pop(server_path, None)
+
+        # Delete the folder
+        try:
+            shutil.rmtree(server_path)
+        except Exception as e:
+            messagebox.showerror(
+                "Error",
+                f"Could not delete server:\n\n{e}"
+            )
+            return
+
+        # Refresh the list
         self.refresh_servers()
 
     def new_server_dialog(self):
