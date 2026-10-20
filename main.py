@@ -14,6 +14,7 @@ from resource import resource_path
 from views.home import HomeView
 from views.servers import ServersView
 from views.console import ConsoleView
+from views.backups import BackupsView
 
 # Folder in docs dir
 DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents")
@@ -232,6 +233,8 @@ class App(ctk.CTk):
             view = ServersView(self.content_frame, self.colors, self.servers_base)
         elif view_name == "console":
             view = ConsoleView(self.content_frame, self.colors, self.servers_base)
+        elif view_name == "backups":
+            view = BackupsView(self.content_frame, self.colors, self.servers_base)
         else:
             view = ctk.CTkLabel(
                 self.content_frame,
